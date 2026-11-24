@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-from ._pythonmonkey import call
+from ._pythonmonkey import acall_with_host, call
 
 logger = logging.getLogger(__name__)
 
@@ -286,44 +286,38 @@ class AutoJoiner:
         self._warned.add((channel_id, error))
         logger.warning("slack-auto-join: could not %s %s: %s", what, channel_id, error)
 
-    async def _join(self, client: Any, channel_id: str, name: str = "") -> bool:
-        """Join a public channel; True only if Hermes wasn't already in it."""
+    async def _membership_action(self, client, action, channel_id, name, bot_user_id=""):
         try:
-            resp = await client.conversations_join(channel=channel_id)
+            if action == "join":
+                response = await client.conversations_join(channel=channel_id)
+            else:
+                response = await client.conversations_invite(channel=channel_id, users=bot_user_id)
         except Exception as exc:
             error = _slack_error(exc)
-            if error == "ratelimited":
+            result = call(__file__, "membershipResult", action, error, "")
+            if result == "retry":
                 raise
-            self._warn_once(channel_id, "join", error)
-            return False
+            if result == "failed":
+                self._warn_once(channel_id, "join" if action == "join" else "invite Hermes to", error)
+                return False
+        else:
+            result = call(__file__, "membershipResult", action, "", _get(response, "warning", ""))
+            name = name or (_get(response, "channel", {}) or {}).get("name", "")
         self.state.seen_member(channel_id)
-        if _get(resp, "warning", "") == "already_in_channel":
-            return False
-        name = name or (_get(resp, "channel", {}) or {}).get("name", "")
-        logger.info("slack-auto-join: joined #%s (%s)", name or channel_id, channel_id)
-        return True
+        if result == "joined":
+            description = "joined" if action == "join" else "invited Hermes to private"
+            logger.info("slack-auto-join: %s #%s (%s)", description, name or channel_id, channel_id)
+        return result != "alreadyJoined"
 
-    async def _invite(self, user_client: Any, channel_id: str, bot_user_id: str, name: str) -> bool:
-        try:
-            await user_client.conversations_invite(channel=channel_id, users=bot_user_id)
-        except Exception as exc:
-            error = _slack_error(exc)
-            if error == "already_in_channel":
-                self.state.seen_member(channel_id)
-                return True
-            if error == "ratelimited":
-                raise
-            self._warn_once(channel_id, "invite Hermes to", error)
-            return False
-        self.state.seen_member(channel_id)
-        logger.info("slack-auto-join: invited Hermes to private #%s (%s)", name or channel_id,
-                    channel_id)
-        return True
+    async def _join(self, client, channel_id, name=""):
+        return await self._membership_action(client, "join", channel_id, name)
 
-    def _note_left(self, channel_id: str, name: str, before: set[str]) -> None:
-        if channel_id in before and channel_id in self.state.left:
-            logger.info("slack-auto-join: Hermes was removed from #%s (%s); it stays out until "
-                        "someone adds it back", name or channel_id, channel_id)
+    async def _invite(self, client, channel_id, bot_user_id, name):
+        return await self._membership_action(client, "invite", channel_id, name, bot_user_id)
+
+    def _note_left(self, channel_id, name):
+        logger.info("slack-auto-join: Hermes was removed from #%s (%s); it stays out until "
+                    "someone adds it back", name or channel_id, channel_id)
 
     async def sweep(self) -> dict[str, list[str]]:
         """Join every public channel and, with a user token, every private one Hermes is missing."""
@@ -342,39 +336,35 @@ class AutoJoiner:
 
     async def _sweep_team(self, team_id: str, client: Any, bot_user_id: str,
                           done: dict[str, list[str]]) -> None:
-        before = set(self.state.members)
-        in_private: set[str] = set()
-        async for ch in _pages(client.conversations_list, "channels",
-                               types="public_channel,private_channel", exclude_archived=True,
-                               limit=200):
-            channel_id, name = ch.get("id"), ch.get("name", "")
-            action = call(__file__, "channelAction", ch, False, False)
-            if action == "skip":
-                continue
-            if action == "member":
-                self.state.seen_member(channel_id)
-                if ch.get("is_private"):
-                    in_private.add(channel_id)
-                continue
-            if self.state.seen_non_member(channel_id):
-                if await self._join(client, channel_id, name):
-                    done["joined"].append(channel_id)
-            else:
-                self._note_left(channel_id, name, before)
+        bot_channels = _pages(client.conversations_list, "channels",
+                              types="public_channel,private_channel", exclude_archived=True, limit=200)
+        user_client = private_channels = None
 
-        user_client, user_team = await self._user()
-        if not call(__file__, "canInvite", user_client is not None, bot_user_id, team_id, user_team):
-            return
-        async for ch in _pages(user_client.users_conversations, "channels", types="private_channel",
-                               exclude_archived=True, limit=200):
-            channel_id, name = ch.get("id"), ch.get("name", "")
-            if call(__file__, "channelAction", ch, True, channel_id in in_private) != "invite":
-                continue
-            if self.state.seen_non_member(channel_id):
-                if await self._invite(user_client, channel_id, bot_user_id, name):
-                    done["invited"].append(channel_id)
-            else:
-                self._note_left(channel_id, name, before)
+        async def inviter_team():
+            nonlocal user_client
+            user_client, team = await self._user()
+            return team if user_client is not None else None
+
+        async def next_private():
+            nonlocal private_channels
+            if private_channels is None:
+                private_channels = _pages(user_client.users_conversations, "channels",
+                                          types="private_channel", exclude_archived=True, limit=200)
+            return await anext(private_channels, None)
+
+        try:
+            await acall_with_host(__file__, "sweepTeam", {
+                "nextBotChannel": lambda: anext(bot_channels, None),
+                "nextPrivateChannel": next_private, "inviterTeam": inviter_team,
+                "seenMember": self.state.seen_member, "seenNonMember": self.state.seen_non_member,
+                "join": lambda channel, name: self._join(client, channel, name),
+                "invite": lambda channel, name: self._invite(user_client, channel, bot_user_id, name),
+                "noteLeft": self._note_left, "joined": done["joined"].append, "invited": done["invited"].append,
+            }, team_id, bot_user_id, list(self.state.members))
+        finally:
+            await bot_channels.aclose()
+            if private_channels is not None:
+                await private_channels.aclose()
 
     async def on_channel_event(self, team_id: str, channel_id: str, name: str = "") -> None:
         """A channel was created or unarchived: join it now unless Hermes was removed from it."""
