@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import sys
 import logging
 import pathlib
 from unittest.mock import AsyncMock, MagicMock
@@ -20,6 +21,7 @@ from plugins.platforms.slack.adapter import SlackAdapter
 _spec = importlib.util.spec_from_file_location(
     "slack_auto_join", pathlib.Path(__file__).resolve().parents[1] / "__init__.py")
 plugin = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = plugin
 _spec.loader.exec_module(plugin)
 
 TEAM, BOT = "T_TEAM", "U_BOT"

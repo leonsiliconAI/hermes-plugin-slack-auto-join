@@ -33,6 +33,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
+from ._pythonmonkey import call
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "slack-auto-join"
@@ -41,7 +43,6 @@ INTERVAL_ENV = "SLACK_AUTO_JOIN_INTERVAL"
 DEFAULT_INTERVAL = 60.0
 MIN_INTERVAL = 15.0
 START_DELAY = 5.0
-JOIN_EVENTS = frozenset({"channel_created", "channel_unarchive"})
 
 _JOINER_ATTR = "_slack_auto_join"
 _WIRED_ATTR = "_slack_auto_join_wired"
@@ -156,12 +157,13 @@ class State:
 
     def seen_non_member(self, channel_id: str) -> bool:
         """Record that Hermes isn't in ``channel_id``; return True if it should be added."""
-        if channel_id in self.members:
+        was_member = channel_id in self.members
+        rejoin = call(__file__, "shouldRejoin", was_member, channel_id in self.left)
+        if was_member:
             self.members.discard(channel_id)
             self.left.add(channel_id)
             self._dirty = True
-            return False
-        return channel_id not in self.left
+        return rejoin
 
     def save(self) -> None:
         if not self._dirty or self.path is None:
@@ -346,15 +348,14 @@ class AutoJoiner:
                                types="public_channel,private_channel", exclude_archived=True,
                                limit=200):
             channel_id, name = ch.get("id"), ch.get("name", "")
-            if not channel_id or ch.get("is_archived"):
+            action = call(__file__, "channelAction", ch, False, False)
+            if action == "skip":
                 continue
-            if ch.get("is_member"):
+            if action == "member":
                 self.state.seen_member(channel_id)
                 if ch.get("is_private"):
                     in_private.add(channel_id)
                 continue
-            if ch.get("is_private"):
-                continue  # The bot never lists a private channel it isn't in.
             if self.state.seen_non_member(channel_id):
                 if await self._join(client, channel_id, name):
                     done["joined"].append(channel_id)
@@ -362,12 +363,12 @@ class AutoJoiner:
                 self._note_left(channel_id, name, before)
 
         user_client, user_team = await self._user()
-        if user_client is None or not bot_user_id or (team_id and user_team and team_id != user_team):
+        if not call(__file__, "canInvite", user_client is not None, bot_user_id, team_id, user_team):
             return
         async for ch in _pages(user_client.users_conversations, "channels", types="private_channel",
                                exclude_archived=True, limit=200):
             channel_id, name = ch.get("id"), ch.get("name", "")
-            if not channel_id or channel_id in in_private or ch.get("is_archived"):
+            if call(__file__, "channelAction", ch, True, channel_id in in_private) != "invite":
                 continue
             if self.state.seen_non_member(channel_id):
                 if await self._invite(user_client, channel_id, bot_user_id, name):
@@ -392,19 +393,11 @@ class AutoJoiner:
                 self.state.save()
 
     def schedule_channel_event(self, body: dict) -> None:
-        event = body.get("event") or {}
-        if body.get("type") != "event_callback" or event.get("type") not in JOIN_EVENTS:
+        event = call(__file__, "channelEvent", body)
+        if event is None:
             return
-        channel = event.get("channel")
-        channel_id = channel.get("id") if isinstance(channel, dict) else channel
-        if not channel_id:
-            return
-        if isinstance(channel, dict) and channel.get("is_private"):
-            return
-        name = channel.get("name", "") if isinstance(channel, dict) else ""
         task = asyncio.get_running_loop().create_task(
-            self.on_channel_event(str(body.get("team_id") or event.get("team") or ""),
-                                  str(channel_id), name))
+            self.on_channel_event(str(event["team"]), str(event["id"]), event["name"]))
         self._event_tasks.add(task)
         task.add_done_callback(self._event_tasks.discard)
 

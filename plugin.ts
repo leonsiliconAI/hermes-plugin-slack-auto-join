@@ -7,7 +7,13 @@ export const pluginName = "slack-auto-join";
 export const pluginDirectory = fileURLToPath(new URL(".", import.meta.url));
 
 /** Files that make up the deployed plugin. */
-export const pluginFiles = ["plugin.yaml", "__init__.py"] as const;
+export const pluginFiles = [
+  "plugin.yaml",
+  "__init__.py",
+  "pyproject.toml",
+  "_pythonmonkey.py",
+  "policy.cjs",
+] as const;
 
 /** Bot events the Hermes Slack app must subscribe to for instant joins. */
 export const manifestBotEvents = ["channel_created", "channel_unarchive"] as const;

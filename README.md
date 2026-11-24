@@ -19,7 +19,7 @@ Subscribe the app to the `channel_created` and `channel_unarchive` bot events (b
 ## Install
 
 ```sh
-hermes plugins install leonsiliconAI/hermes-plugin-slack-auto-join --enable
+hermes plugins install leonsiliconAI/hermes-plugin-slack-auto-join --enable --yes-deps
 ```
 
 See [migration steps](https://github.com/leonsilicon/leonsilicon.ai/blob/main/DEVELOPMENT.md#hermes-plugin-mirrors) for an existing install. Restart the gateway. The gateway log then shows `slack-auto-join: keeping Hermes in every Slack channel` and a `joined #…` line per channel.
