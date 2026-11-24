@@ -1,0 +1,7 @@
+name: slack-auto-join
+label: Slack auto-join
+version: 1.0.0
+description: >
+  Keeps Hermes in every Slack channel: joins new public channels as they're created, sweeps for
+  any it's missing, and (with SLACK_AUTO_JOIN_USER_TOKEN) gets itself invited to private ones.
+author: leonsilicon
