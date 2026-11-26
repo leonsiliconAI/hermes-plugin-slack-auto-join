@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-from ._pythonmonkey import acall_with_host, call
+from ._bridge import acall_with_host, call
 
 logger = logging.getLogger(__name__)
 

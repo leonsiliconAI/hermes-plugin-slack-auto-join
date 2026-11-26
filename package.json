@@ -1,6 +1,6 @@
 {
   "name": "@-/com.leonsilicon.hermes.plugins.slack-auto-join",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Hermes plugin: keep Hermes in every Slack channel, new and private ones included.",
   "type": "module",
